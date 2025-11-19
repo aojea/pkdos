@@ -109,7 +109,7 @@ func main() {
 				for scanner.Scan() {
 					line := scanner.Text()
 					printMutex.Lock()
-					fmt.Fprintf(os.Stdout, "[%s] %s\n", p.Name, line)
+					_, _ = fmt.Fprintf(os.Stdout, "[%s] %s\n", p.Name, line)
 					printMutex.Unlock()
 				}
 			}()
@@ -118,14 +118,14 @@ func main() {
 				for scanner.Scan() {
 					line := scanner.Text()
 					printMutex.Lock()
-					fmt.Fprintf(os.Stderr, "[%s] %s\n", p.Name, line)
+					_, _ = fmt.Fprintf(os.Stderr, "[%s] %s\n", p.Name, line)
 					printMutex.Unlock()
 				}
 			}()
 			// Execute Command
 			err := execCmd(ctx, config, clientset, p.Name, p.Namespace, cmdArray, pwStdout, pwStderr)
-			pwStdout.Close() // Close pipe so scanner finishes
-			pwStderr.Close() // Close pipe so scanner finishes
+			_ = pwStdout.Close() // Close pipe so scanner finishes
+			_ = pwStderr.Close() // Close pipe so scanner finishes
 
 			if err != nil {
 				printMutex.Lock()
