@@ -65,8 +65,8 @@ teardown() {
     echo "$output"
     echo "-------------------"
     [ "$status" -eq 0 ]
-    [[ "$output" == "[upload-test-0] upload-test-0" ]]
-    [[ "$output" == "[upload-test-1] upload-test-1" ]]
+    [[ "$output" == *"[upload-test-0] upload-test-0"* ]]
+    [[ "$output" == *"[upload-test-1] upload-test-1"* ]]
 }
 
 @test "krun uploads a local folder to pods" {
