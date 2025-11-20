@@ -31,7 +31,7 @@ var (
 	kubeconfig    = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	labelSelector = flag.String("label-selector", "app=my-app", "Label selector for pods")
 	namespace     = flag.String("namespace", "default", "Kubernetes namespace")
-	commandStr    = flag.String("command", "echo Hello from $(hostname)", "Command to execute in pods")
+	commandStr    = flag.String("command", "", "Command to execute in pods")
 	uploadSrc     = flag.String("upload-src", "", "Local path to folder/file to upload")
 	uploadDest    = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
 	timeout       = flag.Duration("timeout", 30*time.Second, "Timeout for the execution")
