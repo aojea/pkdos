@@ -190,7 +190,7 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 
 	req.VersionedParams(option, scheme.ParameterCodec)
 
-	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
+	exec, err := remotecommand.NewWebSocketExecutor(config, "GET", req.URL().String())
 	if err != nil {
 		return err
 	}
