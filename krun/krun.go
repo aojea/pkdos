@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +33,7 @@ var (
 	commandStr    = flag.String("command", "", "Command to execute in pods")
 	uploadSrc     = flag.String("upload-src", "", "Local path to folder/file to upload")
 	uploadDest    = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
-	timeout       = flag.Duration("timeout", 30*time.Second, "Timeout for the execution")
+	timeout       = flag.Duration("timeout", 0, "Timeout for the execution")
 )
 
 func main() {
@@ -62,8 +61,14 @@ func main() {
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	ctx, cancel := context.WithTimeout(rootCtx, *timeout)
-	defer cancel()
+	var ctx context.Context
+	var ctxCancel context.CancelFunc
+	if *timeout > 0 {
+		ctx, ctxCancel = context.WithTimeout(rootCtx, *timeout)
+	} else {
+		ctx, ctxCancel = context.WithCancel(rootCtx)
+	}
+	defer ctxCancel()
 
 	// Defer error handling for the metrics server
 	defer runtime.HandleCrash()
