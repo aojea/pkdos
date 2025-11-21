@@ -225,25 +225,22 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 
 // makeTar walks the source and writes a tarball to the writer
 func makeTar(srcPath string, writer io.Writer) error {
-	srcPath = filepath.Clean(srcPath)
-	absSrcPath, err := filepath.Abs(srcPath)
+	absSrcPath, err := filepath.Abs(filepath.Clean(srcPath))
 	if err != nil {
 		return err
 	}
 
 	// Check if the source is a directory
-	info, err := os.Stat(srcPath)
+	info, err := os.Stat(absSrcPath)
 	if err != nil {
 		return err
 	}
 
-	var baseDir string
-	if info.IsDir() {
-		// If it's a directory, we use the directory itself as the base.
-		// This means files inside will have paths relative to the directory,
-		// effectively stripping the directory name from the tar archive.
-		baseDir = absSrcPath
-	} else {
+	// If it's a directory, we use the directory itself as the base.
+	// This means files inside will have paths relative to the directory,
+	// effectively stripping the directory name from the tar archive.
+	baseDir := absSrcPath
+	if !info.IsDir() {
 		// If it's a file, we use its parent as the base, preserving the filename.
 		baseDir = filepath.Dir(absSrcPath)
 	}
@@ -251,7 +248,7 @@ func makeTar(srcPath string, writer io.Writer) error {
 	tw := tar.NewWriter(writer)
 	defer tw.Close() //nolint:errcheck
 
-	return filepath.Walk(srcPath, func(file string, fi os.FileInfo, err error) error {
+	return filepath.Walk(absSrcPath, func(file string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
