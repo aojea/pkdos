@@ -45,11 +45,11 @@ Upload a local file or directory to all matching pods. This uses a streaming `ta
 command is expected to exist on the destination Pods.
 
 ```sh
-# Upload local './config' folder to '/tmp/config' on all pods
+# Upload local './examples' folder to '/tmp/examples' on all pods
 ./bin/krun \
-  --label-selector "app=worker" \
-  --upload-src "./config" \
-  --upload-dest "/tmp/config"
+  --label-selector="app=krun-test" \
+  --upload-src "./examples" \
+  --upload-dest "/tmp/examples"
 ```
 
 ### Upload and Execute (Script piping)
