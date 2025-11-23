@@ -41,10 +41,8 @@ spec:
               command: ["sleep", "3600"]
 EOF
 
-    # 4. Wait for pods
-    # JobSet naming: <jobset-name>-<replicated-job-name>-<job-index>-<pod-index>
-    wait_for_pod_ready "default" "upload-test-worker-0-0"
-    wait_for_pod_ready "default" "upload-test-worker-0-1"
+    # Wait for pods
+    kubectl wait --for=condition=Ready pods -l jobset.sigs.k8s.io/jobset-name=upload-test -n default --timeout=120s
 }
 
 teardown_file() {
