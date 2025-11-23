@@ -13,7 +13,6 @@ setup_file() {
 
     sleep 3
     # Deploy a target workload (JobSet)
-    # This creates 2 pods: upload-test-worker-0-0 and upload-test-worker-0-1
     cat <<EOF | kubectl apply -f -
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
@@ -41,8 +40,20 @@ spec:
               command: ["sleep", "3600"]
 EOF
 
-    # Wait for pods
+    echo "Waiting for pods..."
     kubectl wait --for=condition=Ready pods -l jobset.sigs.k8s.io/jobset-name=upload-test -n default --timeout=120s
+
+    # --- DYNAMIC POD DISCOVERY ---
+    # fetch pod names sorted by name (ensures 0-0 comes before 0-1)
+    # output format will be space separated: "upload-test-worker-0-0-abcde upload-test-worker-0-1-fghij"
+    POD_NAMES=($(kubectl get pods -l jobset.sigs.k8s.io/jobset-name=upload-test -n default --sort-by=.metadata.name -o jsonpath='{.items[*].metadata.name}'))
+
+    # Export these so individual @test functions can see them
+    export POD_0="${POD_NAMES[0]}"
+    export POD_1="${POD_NAMES[1]}"
+
+    echo "Discovered Pod 0: $POD_0"
+    echo "Discovered Pod 1: $POD_1"
 }
 
 teardown_file() {
@@ -58,7 +69,7 @@ teardown() {
     rm -rf "$TEST_DIR"
 }
 
-@test "krun command on pods" {
+@test "krun jobsetcommand on pods" {
 
     # Run krun hostname
     run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
@@ -72,11 +83,13 @@ teardown() {
     echo "$output"
     echo "-------------------"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[upload-test-0] upload-test-0"* ]]
-    [[ "$output" == *"[upload-test-1] upload-test-1"* ]]
+    
+    # Verify the output contains the ACTUAL pod names we discovered
+    [[ "$output" == *"$POD_0"* ]]
+    [[ "$output" == *"$POD_1"* ]]
 }
 
-@test "krun uploads a local folder to pods" {
+@test "krun jobset uploads a local folder to pods" {
     # Prepare Local Files
     mkdir -p "$TEST_DIR/data"
     echo "Hello World" > "$TEST_DIR/data/file1.txt"
@@ -92,13 +105,13 @@ teardown() {
 
     [ "$status" -eq 0 ]
 
-    # 3. Verify content on Pod 0
-    run kubectl exec -n default upload-test-0 -- cat /tmp/remote-data/file1.txt
+    # 3. Verify content on Pod 0 (using dynamic name)
+    run kubectl exec -n default "$POD_0" -- cat /tmp/remote-data/file1.txt
     [ "$status" -eq 0 ]
     [[ "$output" == "Hello World" ]]
 
-    # 4. Verify content on Pod 1 (Parallel check)
-    run kubectl exec -n default upload-test-1 -- cat /tmp/remote-data/config.cfg
+    # 4. Verify content on Pod 1 (using dynamic name)
+    run kubectl exec -n default "$POD_1" -- cat /tmp/remote-data/config.cfg
     [ "$status" -eq 0 ]
     [[ "$output" == "Config Data" ]]
 }
@@ -113,7 +126,6 @@ EOF
     chmod +x "$TEST_DIR/scripts/myscript.sh"
 
     # 2. Run krun: Upload -> Execute
-    # Note: We upload to /tmp/bin and then execute the specific file
     run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
@@ -124,22 +136,13 @@ EOF
 
     [ "$status" -eq 0 ]
 
-    # 3. Assert Output from both pods
-    [[ "$output" == *"[upload-test-0] I am running on upload-test-0"* ]]
-    [[ "$output" == *"[upload-test-1] I am running on upload-test-1"* ]]
+    # 3. Assert Output from both pods contains their dynamic hostnames
+    [[ "$output" == *"I am running on $POD_0"* ]]
+    [[ "$output" == *"I am running on $POD_1"* ]]
 }
 
 @test "krun excludes files and folders matching regex pattern" {
     # 1. Prepare Local Files
-    # Structure:
-    #   data/
-    #    ├── keep.txt          (Should be kept)
-    #    ├── ignore.log        (Should be excluded by extension)
-    #    ├── secret/           (Should be excluded by directory name)
-    #    │   └── key.pem
-    #    └── subdir/
-    #        └── keep_sub.txt  (Should be kept)
-
     mkdir -p "$TEST_DIR/data/secret"
     mkdir -p "$TEST_DIR/data/subdir"
     
@@ -149,8 +152,6 @@ EOF
     echo "Keep sub" > "$TEST_DIR/data/subdir/keep_sub.txt"
 
     # 2. Run krun with exclude pattern
-    # We use a regex that matches either .log extension OR the secret directory
-    # Regex: \.log$|secret
     run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
@@ -161,24 +162,23 @@ EOF
 
     [ "$status" -eq 0 ]
 
-    # 3. Verify 'keep.txt' EXISTS
-    run kubectl exec -n default upload-test-0 -- cat /tmp/exclude_test/keep.txt
+    # 3. Verify 'keep.txt' EXISTS on Pod 0
+    run kubectl exec -n default "$POD_0" -- cat /tmp/exclude_test/keep.txt
     [ "$status" -eq 0 ]
     [[ "$output" == "Keep this" ]]
 
-    # 4. Verify 'subdir/keep_sub.txt' EXISTS (nested file check)
-    run kubectl exec -n default upload-test-0 -- cat /tmp/exclude_test/subdir/keep_sub.txt
+    # 4. Verify 'subdir/keep_sub.txt' EXISTS
+    run kubectl exec -n default "$POD_0" -- cat /tmp/exclude_test/subdir/keep_sub.txt
     [ "$status" -eq 0 ]
     [[ "$output" == "Keep sub" ]]
 
     # 5. Verify 'ignore.log' does NOT exist
-    # 'ls' returns exit code 1 if the file is missing
-    run kubectl exec -n default upload-test-0 -- ls /tmp/exclude_test/ignore.log
+    run kubectl exec -n default "$POD_0" -- ls /tmp/exclude_test/ignore.log
     [ "$status" -ne 0 ]
     [[ "$output" == *"No such file"* ]]
 
     # 6. Verify 'secret' directory does NOT exist
-    run kubectl exec -n default upload-test-0 -- ls /tmp/exclude_test/secret
+    run kubectl exec -n default "$POD_0" -- ls /tmp/exclude_test/secret
     [ "$status" -ne 0 ]
     [[ "$output" == *"No such file"* ]]
 }
