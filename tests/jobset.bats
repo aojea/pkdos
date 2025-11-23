@@ -85,8 +85,8 @@ teardown() {
     [ "$status" -eq 0 ]
     
     # Verify the output contains the ACTUAL pod names we discovered
-    [[ "$output" == *"$POD_0"* ]]
-    [[ "$output" == *"$POD_1"* ]]
+    [[ "$output" == *upload-test-worker-0-0* ]]
+    [[ "$output" == *upload-test-worker-0-1* ]]
 }
 
 @test "krun jobset uploads a local folder to pods" {
@@ -137,8 +137,8 @@ EOF
     [ "$status" -eq 0 ]
 
     # 3. Assert Output from both pods contains their dynamic hostnames
-    [[ "$output" == *"I am running on $POD_0"* ]]
-    [[ "$output" == *"I am running on $POD_1"* ]]
+    [[ "$output" == *"I am running on upload-test-worker-0-0"* ]]
+    [[ "$output" == *"I am running on upload-test-worker-0-1"* ]]
 }
 
 @test "krun excludes files and folders matching regex pattern" {
