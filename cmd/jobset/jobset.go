@@ -194,7 +194,7 @@ var LaunchSubcmd = &cobra.Command{
 func init() {
 	JobSetCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
 	JobSetCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
-	JobSetCmd.Flags().StringVarP(&name, "jobset-name", "j", "", "Name of the JobSet")
+	JobSetCmd.PersistentFlags().StringVarP(&name, "name", "j", "", "Name of the JobSet")
 
 	// Subcommand to run commands/upload files to pods in the JobSet
 	JobSetCmd.AddCommand(RunSubcmd)
