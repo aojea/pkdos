@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,13 +28,15 @@ import (
 )
 
 var (
-	kubeconfig    = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	labelSelector = flag.String("label-selector", "app=my-app", "Label selector for pods")
-	namespace     = flag.String("namespace", "default", "Kubernetes namespace")
-	commandStr    = flag.String("command", "", "Command to execute in pods")
-	uploadSrc     = flag.String("upload-src", "", "Local path to folder/file to upload")
-	uploadDest    = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
-	timeout       = flag.Duration("timeout", 0, "Timeout for the execution")
+	kubeconfig     = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	labelSelector  = flag.String("label-selector", "app=my-app", "Label selector for pods")
+	namespace      = flag.String("namespace", "default", "Kubernetes namespace")
+	commandStr     = flag.String("command", "", "Command to execute in pods")
+	uploadSrc      = flag.String("upload-src", "", "Local path to folder/file to upload")
+	uploadDest     = flag.String("upload-dest", "", "Remote path (e.g. /tmp/app)")
+	timeout        = flag.Duration("timeout", 0, "Timeout for the execution")
+	excludePattern = flag.String("exclude", "", "Regex pattern to exclude files when uploading")
+	excludeRegex   *regexp.Regexp
 )
 
 func main() {
@@ -56,6 +59,14 @@ func main() {
 	}
 	if *uploadSrc != "" && *uploadDest == "" {
 		klog.Fatal("If --upload-src is provided, --upload-dest is required")
+	}
+
+	if *excludePattern != "" {
+		var err error
+		excludeRegex, err = regexp.Compile(*excludePattern)
+		if err != nil {
+			klog.Fatalf("Invalid exclude pattern: %v", err)
+		}
 	}
 
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -133,7 +144,7 @@ func main() {
 				// Start Tar Producer
 				go func() {
 					defer pw.Close() //nolint:errcheck
-					if err := makeTar(*uploadSrc, pw); err != nil {
+					if err := makeTar(*uploadSrc, pw, excludeRegex); err != nil {
 						// Closing with error ensures the execCmd stream fails fast
 						pw.CloseWithError(err)
 						klog.Errorf("Tar Error: %s %s\n", prefix, err)
@@ -240,7 +251,7 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 }
 
 // makeTar walks the source and writes a tarball to the writer
-func makeTar(srcPath string, writer io.Writer) error {
+func makeTar(srcPath string, writer io.Writer, excludeRegex *regexp.Regexp) error {
 	absSrcPath, err := filepath.Abs(filepath.Clean(srcPath))
 	if err != nil {
 		return err
@@ -279,6 +290,15 @@ func makeTar(srcPath string, writer io.Writer) error {
 		// Its relative path is ".". We skip adding a tar entry for "." to avoid
 		// messing with the destination root permissions or creating a "./" folder.
 		if relPath == "." {
+			return nil
+		}
+
+		if excludeRegex != nil && excludeRegex.MatchString(relPath) {
+			// If it matches and is a directory, skip the whole tree
+			if fi.IsDir() {
+				return filepath.SkipDir
+			}
+			// If it's a file, just skip adding it
 			return nil
 		}
 

@@ -121,3 +121,57 @@ EOF
     [[ "$output" == *"[upload-test-0] I am running on upload-test-0"* ]]
     [[ "$output" == *"[upload-test-1] I am running on upload-test-1"* ]]
 }
+
+@test "krun excludes files and folders matching regex pattern" {
+    # 1. Prepare Local Files
+    # Structure:
+    #   data/
+    #    ├── keep.txt          (Should be kept)
+    #    ├── ignore.log        (Should be excluded by extension)
+    #    ├── secret/           (Should be excluded by directory name)
+    #    │   └── key.pem
+    #    └── subdir/
+    #        └── keep_sub.txt  (Should be kept)
+
+    mkdir -p "$TEST_DIR/data/secret"
+    mkdir -p "$TEST_DIR/data/subdir"
+    
+    echo "Keep this" > "$TEST_DIR/data/keep.txt"
+    echo "Ignore this" > "$TEST_DIR/data/ignore.log"
+    echo "Secret Key" > "$TEST_DIR/data/secret/key.pem"
+    echo "Keep sub" > "$TEST_DIR/data/subdir/keep_sub.txt"
+
+    # 2. Run krun with exclude pattern
+    # We use a regex that matches either .log extension OR the secret directory
+    # Regex: \.log$|secret
+    run "$BATS_TEST_DIRNAME/../bin/krun" \
+        --kubeconfig="$KUBECONFIG" \
+        --namespace="default" \
+        --label-selector="app=upload-target" \
+        --upload-src="$TEST_DIR/data" \
+        --upload-dest="/tmp/exclude_test" \
+        --exclude="\.log$|secret"
+
+    [ "$status" -eq 0 ]
+
+    # 3. Verify 'keep.txt' EXISTS
+    run kubectl exec -n default upload-test-0 -- cat /tmp/exclude_test/keep.txt
+    [ "$status" -eq 0 ]
+    [[ "$output" == "Keep this" ]]
+
+    # 4. Verify 'subdir/keep_sub.txt' EXISTS (nested file check)
+    run kubectl exec -n default upload-test-0 -- cat /tmp/exclude_test/subdir/keep_sub.txt
+    [ "$status" -eq 0 ]
+    [[ "$output" == "Keep sub" ]]
+
+    # 5. Verify 'ignore.log' does NOT exist
+    # 'ls' returns exit code 1 if the file is missing
+    run kubectl exec -n default upload-test-0 -- ls /tmp/exclude_test/ignore.log
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No such file"* ]]
+
+    # 6. Verify 'secret' directory does NOT exist
+    run kubectl exec -n default upload-test-0 -- ls /tmp/exclude_test/secret
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No such file"* ]]
+}
