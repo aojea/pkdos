@@ -1,9 +1,10 @@
 # krun
 
-Execute commands in parallel in Pods
-
+krun is a command-line tool designed to simplify AI/ML workflows on Kubernetes by providing the ability to execute commands in parallel in Pods and handle file synchronization (upload) to multiple targets concurrently.
 
 ## Installation
+
+You can build the binary using the provided Makefile:
 
 ```sh
 make build
@@ -12,69 +13,117 @@ make build
 
 ## Usage
 
-### Parallel Command Execution
+The `krun` tool has two primary subcommands: `run` for general Pod-based operations using a label selector, and `jobset` for operations targeting JobSet workloads.
 
-Execute a shell command on all pods matching a label selector:
+### `krun run`: General Pod Execution
 
-```sh
-$ kubectl apply -f examples/statefulset.yaml
-statefulset.apps/krun-test-web created
-```
+The `run` subcommand executes a command or uploads files to all pods matching a Kubernetes **label selector** (`--label-selector`).
 
-```sh
-$ kubectl wait --for=condition=Ready pod/krun-test-web-0 pod/krun-test-web-1 --timeout=60s
-pod/krun-test-web-0 condition met
-pod/krun-test-web-1 condition met
-```
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `-l, --label-selector` | Label selector for pods (e.g., `app=my-app`). **Required**. | |
+| `--upload-src` | Local path to folder/file to upload. | |
+| `--upload-dest` | Remote destination path (e.g., `/tmp/app`). **Required if** `--upload-src` is set. | |
+| `--exclude` | Regex pattern to exclude files when uploading. | |
+| `--timeout` | Timeout for the execution (e.g., `30s`). | 0 (no timeout) |
 
-```sh
-$ make build
-Building all binaries...
-GOOS= GOARCH= go build -o ./bin/krun ./krun
-```
+#### Parallel Command Execution
+
+Execute a shell command on all matching pods. The command to run is passed after a double-dash (`--`).
 
 ```sh
-./bin/krun   --namespace="default"   --label-selector="app=krun-test"   --command="hostname"
+# Example: Run 'hostname' on all pods labeled with app=backend
+./bin/krun run --label-selector=app=backend -- hostname
+
+# Output includes pod names as prefix
 [krun-test-web-1] krun-test-web-1
 [krun-test-web-0] krun-test-web-0
 ```
 
-### File Synchronization (Upload)
+#### File Synchronization (Upload)
 
-Upload a local file or directory to all matching pods. This uses a streaming `tar` approach, so `tar`
-command is expected to exist on the destination Pods.
+Upload a local file or directory to all matching pods concurrently. The upload mechanism uses a streaming `tar` approach, requiring the `tar` command to exist on the destination Pods.
 
 ```sh
 # Upload local './examples' folder to '/tmp/examples' on all pods
-./bin/krun \
+./bin/krun run \
   --label-selector="app=krun-test" \
   --upload-src "./examples" \
   --upload-dest "/tmp/examples"
 ```
 
-### Upload and Execute (Script piping)
+#### Upload and Execute (Script Piping)
 
-You can combine upload and execution to run local scripts on remote pods.
-The tool guarantees the upload finishes before the command starts.
+Combine file upload and command execution to run local scripts remotely. The upload completes before the command starts.
 
 ```sh
-# 1. Upload the script
-# 2. Execute it immediately
-./bin/krun \
+# 1. Upload a local script/binary
+# 2. Execute it immediately on the remote pods
+./bin/krun run \
   --label-selector "app=database" \
   --upload-src "./scripts/maintenance.sh" \
   --upload-dest "/tmp/maintenance.sh" \
-  --command "/bin/sh /tmp/maintenance.sh"
+  -- /bin/sh /tmp/maintenance.sh
 ```
 
-### Upload Custom Binary and Run
+### `krun jobset`: JobSet Workflows
 
-Distribute a custom tool or binary and run it.
+This command group provides specific tools for managing Kubernetes JobSet workloads, often used for high-performance or distributed training applications.
+
+#### `krun jobset run` (Execute/Upload on JobSet Pods)
+
+Works like `krun run`, but targets pods belonging to a specific JobSet identified by `--name`.
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `-j, --name` | **Name of the JobSet** to target. **Required**. | |
+| `--exclude` | Regex pattern to exclude files/folders. | `(^|/)\.` (excludes all hidden files and folders) |
 
 ```sh
-/bin/krun \
-  --label-selector "app=backend" \
-  --upload-src "./bin/my-debug-tool" \
-  --upload-dest "/usr/local/bin/my-debug-tool" \
-  --command "/usr/local/bin/my-debug-tool --verbose"
+# Run a command on pods belonging to a JobSet named 'stoelinga'
+krun jobset run --name=stoelinga -- pip install -r requirements.txt
+
+# Upload files and run a script on all JobSet pods
+krun jobset run \
+  --name=stoelinga \
+  --upload-src=./bin \
+  --upload-dest=/tmp/bin \
+  -- /tmp/bin/start.sh
+```
+
+#### `krun jobset launch` (Launch a JobSet)
+
+This subcommand generates and creates a JobSet manifest, useful for launching hardware-accelerated workloads like TPUs.
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--tpu-type` | Type and topology of TPU to launch (e.g., `v5p-32`, `tpu7x-16`). | `tpu7x-16` |
+| `--image` | Container image to use for the TPU workers. | `gcr.io/tensorflow/tensorflow:latest` |
+
+```sh
+# Launch a JobSet named 'tpu-job' with a v5p-32 topology
+krun jobset launch \
+  --name=tpu-job \
+  --tpu-type=v5p-32 \
+  --image=my-custom-ml-image:latest
+```
+
+## Development and Testing
+
+The project uses Go for the main binary and bats for integration tests.
+
+### Running Integration Tests
+Integration tests require `bats` and `kind` (Kubernetes in Docker) installed.
+
+
+Run the full suite of tests:
+
+```sh
+bats tests/
+```
+
+To troubleshoot individual tests, you can use:
+
+```sh
+bats -x -o _artifacts --print-output-on-failure --filter "mytest" tests
 ```
