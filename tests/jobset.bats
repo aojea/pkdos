@@ -3,43 +3,51 @@
 load 'common'
 
 setup_file() {
-    # 1. Build the latest krun binary
-    echo "Building krun binary..."
-    (cd "$BATS_TEST_DIRNAME/.." && make build)
+    # Install latest jobset
+    echo "Installing jobset version v0.10.1..."
+    JOBSET_VERSION=v0.10.1
+    kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/$JOBSET_VERSION/manifests.yaml
+    
+    echo "Waiting for JobSet controller..."
+    kubectl wait --for=condition=Available deployment/jobset-controller-manager -n jobset-system --timeout=120s
 
-    # 2. Deploy a target app (Busybox ensures 'tar' is available)
-    # Using a StatefulSet to get stable names (upload-test-0, upload-test-1)
+    # Deploy a target workload (JobSet)
+    # This creates 2 pods: upload-test-worker-0-0 and upload-test-worker-0-1
     cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: StatefulSet
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
 metadata:
   name: upload-test
   namespace: default
 spec:
-  selector:
-    matchLabels:
-      app: upload-target
-  serviceName: "upload-service"
-  replicas: 2
-  template:
-    metadata:
-      labels:
-        app: upload-target
-    spec:
-      terminationGracePeriodSeconds: 0
-      containers:
-      - name: main
-        image: registry.k8s.io/e2e-test-images/busybox:1.29-2
-        command: ["sleep", "3600"]
+  replicatedJobs:
+  - name: worker
+    replicas: 1
+    template:
+      spec:
+        parallelism: 2
+        completions: 2
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              app: upload-target
+          spec:
+            terminationGracePeriodSeconds: 0
+            containers:
+            - name: main
+              image: registry.k8s.io/e2e-test-images/busybox:1.29-2
+              command: ["sleep", "3600"]
 EOF
 
-    # 3. Wait for pods
-    wait_for_pod_ready "default" "upload-test-0"
-    wait_for_pod_ready "default" "upload-test-1"
+    # 4. Wait for pods
+    # JobSet naming: <jobset-name>-<replicated-job-name>-<job-index>-<pod-index>
+    wait_for_pod_ready "default" "upload-test-worker-0-0"
+    wait_for_pod_ready "default" "upload-test-worker-0-1"
 }
 
 teardown_file() {
-    kubectl delete statefulset upload-test --namespace=default --wait=false
+    kubectl delete jobset upload-test --namespace=default --wait=false
 }
 
 setup() {
@@ -54,10 +62,10 @@ teardown() {
 @test "krun command on pods" {
 
     # Run krun hostname
-    run "$BATS_TEST_DIRNAME/../bin/krun" run \
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
-        --label-selector="app=upload-target" \
+        --name="upload-test" \
         -- hostname
     
     # Debug output if test fails
@@ -70,16 +78,16 @@ teardown() {
 }
 
 @test "krun uploads a local folder to pods" {
-    # 1. Prepare Local Files
+    # Prepare Local Files
     mkdir -p "$TEST_DIR/data"
     echo "Hello World" > "$TEST_DIR/data/file1.txt"
     echo "Config Data" > "$TEST_DIR/data/config.cfg"
 
-    # 2. Run krun upload
-    run "$BATS_TEST_DIRNAME/../bin/krun" run \
+    # Run krun upload
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
-        --label-selector="app=upload-target" \
+        --name="upload-test" \
         --upload-src="$TEST_DIR/data" \
         --upload-dest="/tmp/remote-data"
 
@@ -107,10 +115,10 @@ EOF
 
     # 2. Run krun: Upload -> Execute
     # Note: We upload to /tmp/bin and then execute the specific file
-    run "$BATS_TEST_DIRNAME/../bin/krun" run \
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
-        --label-selector="app=upload-target" \
+        --name="upload-test" \
         --upload-src="$TEST_DIR/scripts" \
         --upload-dest="/tmp/bin" \
         -- /bin/sh -c "/tmp/bin/myscript.sh"
@@ -144,10 +152,10 @@ EOF
     # 2. Run krun with exclude pattern
     # We use a regex that matches either .log extension OR the secret directory
     # Regex: \.log$|secret
-    run "$BATS_TEST_DIRNAME/../bin/krun" run \
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
         --kubeconfig="$KUBECONFIG" \
         --namespace="default" \
-        --label-selector="app=upload-target" \
+        --name="upload-test" \
         --upload-src="$TEST_DIR/data" \
         --upload-dest="/tmp/exclude_test" \
         --exclude="\.log$|secret"

@@ -4,6 +4,9 @@ set -eu
 
 function setup_suite {
   export BATS_TEST_TIMEOUT=120
+  echo "Building krun binary..."
+  (cd "$BATS_TEST_DIRNAME/.." && make build)
+  
   # Define the name of the kind cluster
   export CLUSTER_NAME="test-cluster"
   if kind get clusters | grep -q "^${CLUSTER_NAME}$"; then
