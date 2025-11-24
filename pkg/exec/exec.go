@@ -87,8 +87,8 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				prErr, pwErr := io.Pipe()
 
 				// Start Log Processors
-				go logStream(prOut, logCh, prefix, os.Stdout)
-				go logStream(prErr, logCh, prefix, os.Stderr)
+				go logStream(ctx, prOut, logCh, prefix, os.Stdout)
+				go logStream(ctx, prErr, logCh, prefix, os.Stderr)
 
 				// Execute
 				err := execCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
@@ -144,10 +144,14 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 	})
 }
 
-func logStream(r io.Reader, ch chan<- logEntry, prefix string, out io.Writer) {
+func logStream(ctx context.Context, r io.Reader, ch chan<- logEntry, prefix string, out io.Writer) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		ch <- logEntry{prefix: prefix, text: scanner.Text(), out: out}
+		select {
+		case ch <- logEntry{prefix: prefix, text: scanner.Text(), out: out}:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
