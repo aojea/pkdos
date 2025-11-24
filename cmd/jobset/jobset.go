@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 
 	jobsetapi "sigs.k8s.io/jobset/api/jobset/v1alpha2"
 	jobsetclient "sigs.k8s.io/jobset/client-go/clientset/versioned"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -43,8 +43,10 @@ var (
 	excludePattern string
 	excludeRegex   *regexp.Regexp
 	// launch subcommand flags
-	tpuType string
-	image   string
+	deviceType string
+	image      string
+	dryRun     bool
+	numSlices  int
 )
 
 var JobSetCmd = &cobra.Command{
@@ -143,12 +145,32 @@ var RunSubcmd = &cobra.Command{
 var LaunchSubcmd = &cobra.Command{
 	Use:   "launch [flags]",
 	Short: "Launch a jobset",
-	Example: `  # Run a command on pods belonging to a JobSet
-  krun jobset run --name=stoelinga -- pip install -r requirements.txt
+	Example: `  # Launch a TPU JobSet
+  krun jobset launch --name=stoelinga --device-type=tpu-7x-16 --image=python:3.12
 
-  # Upload files and run a script
-  krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
+  # Launch a GPU JobSet
+  krun jobset launch --name=stoelinga --device-type=gpu-l4-1 --image=nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+
+		// Create the JobSet
+		js, err := GenerateJobSet(name, namespace, deviceType, image, "sleep infinity", numSlices)
+		if err != nil {
+			return fmt.Errorf("failed to generate jobset: %w", err)
+		}
+
+		if dryRun {
+			// Set TypeMeta for correct YAML output
+			js.TypeMeta = metav1.TypeMeta{
+				APIVersion: jobsetapi.SchemeGroupVersion.String(),
+				Kind:       "JobSet",
+			}
+			yamlData, err := yaml.Marshal(js)
+			if err != nil {
+				return fmt.Errorf("failed to marshal jobset to yaml: %w", err)
+			}
+			fmt.Println(string(yamlData))
+			return nil
+		}
 
 		// Setup Context
 		ctx := cmd.Context()
@@ -156,7 +178,6 @@ var LaunchSubcmd = &cobra.Command{
 		defer runtime.HandleCrash()
 
 		var config *rest.Config
-		var err error
 		if kubeconfig == "" {
 			if home := homedir.HomeDir(); home != "" {
 				kubeconfig = filepath.Join(home, ".kube", "config")
@@ -175,12 +196,7 @@ var LaunchSubcmd = &cobra.Command{
 			klog.Fatalf("can not create client-go client: %v", err)
 		}
 
-		// Create the JobSet
-		js, err := GenerateTPUJobSet(name, namespace, tpuType, image, "sleep infinity")
-		if err != nil {
-			return fmt.Errorf("failed to generate jobset: %w", err)
-		}
-		klog.Infof("Creating JobSet %q in namespace %q with accelerator %q...", name, namespace, tpuType)
+		klog.Infof("Creating JobSet %q in namespace %q with device type %q...", name, namespace, deviceType)
 		createdJS, err := clientset.JobsetV1alpha2().JobSets(namespace).Create(ctx, js, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create jobset: %w", err)
@@ -204,71 +220,54 @@ func init() {
 	RunSubcmd.Flags().DurationVar(&timeout, "timeout", 0, "Timeout for the execution")
 
 	JobSetCmd.AddCommand(LaunchSubcmd)
-	LaunchSubcmd.Flags().StringVar(&tpuType, "tpu-type", "tpu7x-16", "Type of TPU to launch and topology")
-	LaunchSubcmd.Flags().StringVar(&image, "image", "gcr.io/tensorflow/tensorflow:latest", "Container image to use for the TPU workers")
+	LaunchSubcmd.Flags().StringVar(&deviceType, "device-type", "tpu-7x-16", "Type of accelerator to launch (e.g. tpu-7x-16, gpu-l4-1)")
+	LaunchSubcmd.Flags().StringVar(&image, "image", "ubuntu:24.04", "Container image to use for the workers")
+	LaunchSubcmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the JobSet yaml without creating it")
+	LaunchSubcmd.Flags().IntVar(&numSlices, "num-slices", 1, "Number of slices (replicas) to launch")
 
 }
 
-// TPUHardwareSpec defines the physical properties of a TPU generation
-type TPUHardwareSpec struct {
-	AcceleratorLabel string // e.g., "tpu-v4-pod", "tpu-v5-lite-podslice"
-	ChipsPerNode     int    // How many chips exist on a single physical node
-}
+// GenerateJobSet creates the K8s JobSet object based on the device-type
+func GenerateJobSet(name, namespace, deviceTypeString, imageName, cmd string, numSlices int) (*jobsetapi.JobSet, error) {
 
-// KnownTPUs maps the parsed prefix to hardware specs.
-// In a real app, this might be config-driven.
-var KnownTPUs = map[string]TPUHardwareSpec{
-	"v4":        {AcceleratorLabel: "tpu-v4-pod", ChipsPerNode: 4}, // Note: varies by topology, simplified for example
-	"v5litepod": {AcceleratorLabel: "tpu-v5-lite-podslice", ChipsPerNode: 8},
-	"v5p":       {AcceleratorLabel: "tpu-v5p-slice", ChipsPerNode: 8},
-	"tpu7x":     {AcceleratorLabel: "tpu-v7x-slice", ChipsPerNode: 8}, // Hypothetical example from your prompt
-}
-
-// ParseTPUType splits "tpu7x-64" into "tpu7x" (type) and 64 (total chips)
-func ParseTPUType(input string) (string, int, error) {
-	// Find the last hyphen to separate type from count
-	lastDash := strings.LastIndex(input, "-")
-	if lastDash == -1 {
-		return "", 0, fmt.Errorf("invalid format: expected [type]-[chips], got %s", input)
-	}
-
-	tpuType := input[:lastDash]
-	chipsStr := input[lastDash+1:]
-
-	chips, err := strconv.Atoi(chipsStr)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid chip count: %v", err)
-	}
-
-	return tpuType, chips, nil
-}
-
-// GenerateTPUJobSet creates the K8s JobSet object based on the tpu-type
-func GenerateTPUJobSet(name, namespace, tpuTypeString, imageName, cmd string) (*jobsetapi.JobSet, error) {
-
-	// 1. Parse the Input
-	acceleratorType, totalChips, err := ParseTPUType(tpuTypeString)
+	// 1. Get System Characteristics
+	sysChar, err := GetSystemCharacteristics(deviceTypeString)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Look up Hardware Specs
-	spec, exists := KnownTPUs[acceleratorType]
-	if !exists {
-		// Fallback or error if type is unknown
-		return nil, fmt.Errorf("unknown tpu type: %s", acceleratorType)
+	accChar, ok := acceleratorTypeToCharacteristics[sysChar.AcceleratorType]
+	if !ok {
+		return nil, fmt.Errorf("unknown accelerator type: %s", sysChar.AcceleratorType)
 	}
 
-	// If we need 64 chips and there are 8 chips per node, we need 8 nodes.
-	if totalChips%spec.ChipsPerNode != 0 {
-		return nil, fmt.Errorf("requested %d chips, but must be a multiple of %d (chips per node)", totalChips, spec.ChipsPerNode)
+	// 2. Calculate Resources and Node Selectors
+	nodeSelector := map[string]string{}
+	if accChar.MachineLabel != "" {
+		switch sysChar.AcceleratorType {
+		case AcceleratorTypeTPU:
+			nodeSelector[accChar.MachineLabel] = sysChar.Topology
+		case AcceleratorTypeGPU:
+			nodeSelector[accChar.MachineLabel] = sysChar.GCEMachineType
+		}
 	}
-	numNodes := int32(totalChips / spec.ChipsPerNode)
+	if accChar.AcceleratorLabel != "" {
+		nodeSelector[accChar.AcceleratorLabel] = sysChar.GKEAccelerator
+	}
 
-	// Standard GKE TPU Resource Request
-	tpuResource := corev1.ResourceList{
-		"google.com/tpu": resource.MustParse(fmt.Sprintf("%d", spec.ChipsPerNode)),
+	resourceList := corev1.ResourceList{}
+	if sysChar.AcceleratorType == AcceleratorTypeTPU || sysChar.AcceleratorType == AcceleratorTypeGPU {
+		resourceList[corev1.ResourceName(accChar.ResourceType)] = resource.MustParse(fmt.Sprintf("%d", sysChar.ChipsPerVM))
 	}
+
+	// 3. Construct JobSet
+	// Calculate parallelism and completions
+	// For TPU: Parallelism = Completions = VMsPerSlice (assuming 1 slice for now)
+	// For GPU/CPU: Parallelism = Completions = VMsPerSlice (usually 1, but can be more for multi-node)
+	// The Python code has vms_per_slice.
+	// If we assume we are launching 1 slice (which seems to be the case for "launch a jobset"), then:
+	numNodes := int32(sysChar.VMsPerSlice)
+	replicas := int32(numSlices)
 
 	jobSet := &jobsetapi.JobSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -278,7 +277,8 @@ func GenerateTPUJobSet(name, namespace, tpuTypeString, imageName, cmd string) (*
 		Spec: jobsetapi.JobSetSpec{
 			ReplicatedJobs: []jobsetapi.ReplicatedJob{
 				{
-					Name: "main", // The main workload
+					Name:     "j", // Single letter to keep pod names short
+					Replicas: replicas,
 					Template: batchv1.JobTemplateSpec{
 						Spec: batchv1.JobSpec{
 							Parallelism:  &numNodes,                             // Run on 'numNodes' pods simultaneously
@@ -287,23 +287,24 @@ func GenerateTPUJobSet(name, namespace, tpuTypeString, imageName, cmd string) (*
 							Template: corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									RestartPolicy: corev1.RestartPolicyNever,
-									NodeSelector: map[string]string{
-										"cloud.google.com/gke-tpu-accelerator": spec.AcceleratorLabel,
-										"cloud.google.com/gke-tpu-topology":    tpuTypeString, // Often passed as topology label
-									},
+									NodeSelector:  nodeSelector,
 									Containers: []corev1.Container{
 										{
 											Name:    "workload",
 											Image:   imageName,
 											Command: strings.Split(cmd, " "),
 											Resources: corev1.ResourceRequirements{
-												Limits:   tpuResource,
-												Requests: tpuResource,
+												Limits:   resourceList,
+												Requests: resourceList,
 											},
 											Env: []corev1.EnvVar{
 												{
-													Name:  "TPU_TYPE",
-													Value: tpuTypeString,
+													Name:  "DEVICE_TYPE",
+													Value: deviceTypeString,
+												},
+												{
+													Name:  "ACCELERATOR_TYPE",
+													Value: string(sysChar.AcceleratorType),
 												},
 											},
 										},
