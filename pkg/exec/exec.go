@@ -25,21 +25,21 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// TODO: Limit concurrency with a worker pool if too many pods?
-	concurrency := len(pods)
-	workerChan := make(chan struct{}, concurrency)
-	var printMutex sync.Mutex
+	// do not block on logging
+	logCh := make(chan logEntry, 1000)
+	loggerDone := make(chan struct{})
+	go logger(logCh, loggerDone)
 
+	// each pod is processed in a separate goroutine
+	var wg sync.WaitGroup
 	for i, pod := range pods {
 		if ctx.Err() != nil {
 			klog.Infof("Context done, cancelling remaining %d operations... %v", len(pods)-i, ctx.Err())
 			break
 		}
-
+		wg.Add(1)
 		go func(p corev1.Pod) {
-			defer func() {
-				workerChan <- struct{}{}
-			}()
+			defer wg.Done()
 			prefix := fmt.Sprintf("[%s]", p.Name)
 
 			// --- PHASE 1: UPLOAD (TAR STREAMING) ---
@@ -63,9 +63,7 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				// We must provide at least one stream (stdin, stdout, stderr) for k8s exec.
 				err := execCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
 				if err != nil {
-					printMutex.Lock()
-					_, _ = fmt.Fprintf(os.Stderr, "Mkdir Error: %s %s\n", prefix, err)
-					printMutex.Unlock()
+					logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Mkdir Error: %v", err), out: os.Stderr}
 					// If mkdir fails, we stop
 					return
 				}
@@ -76,15 +74,11 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				// Pass 'pr' as Stdin
 				err = execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
 				if err != nil {
-					printMutex.Lock()
-					_, _ = fmt.Fprintf(os.Stderr, "Transfer Error: %s %s\n", prefix, err)
-					printMutex.Unlock()
+					logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Transfer Error: %v", err), out: os.Stderr}
 					// If upload fails, we probably shouldn't run the command
 					return
 				}
-				printMutex.Lock()
-				_, _ = fmt.Fprintf(os.Stderr, "%s Synced %s -> %s\n", prefix, uploadSrc, uploadDest)
-				printMutex.Unlock()
+				logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Synced %s -> %s", uploadSrc, uploadDest), out: os.Stderr}
 			}
 
 			if len(commandArgs) > 0 {
@@ -93,8 +87,8 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				prErr, pwErr := io.Pipe()
 
 				// Start Log Processors
-				go logStream(prOut, &printMutex, prefix, os.Stdout)
-				go logStream(prErr, &printMutex, prefix, os.Stderr)
+				go logStream(prOut, logCh, prefix, os.Stdout)
+				go logStream(prErr, logCh, prefix, os.Stderr)
 
 				// Execute
 				err := execCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
@@ -103,22 +97,20 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				_ = pwErr.Close()
 
 				if err != nil {
-					printMutex.Lock()
-					_, _ = fmt.Fprintf(os.Stderr, "Command Error: %s %s\n", prefix, err)
-					printMutex.Unlock()
+					logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Command Error: %v", err), out: os.Stderr}
 				}
 			}
 		}(pod)
 	}
 
-	for range concurrency {
-		select {
-		case <-ctx.Done():
-			klog.Infof("Context done, cancelling remaining operations... %v", ctx.Err())
-			return ctx.Err()
-		case <-workerChan:
-			// One worker finished
-		}
+	wg.Wait()
+	close(logCh)
+	// wait for logger to finish
+	<-loggerDone
+
+	if ctx.Err() != nil {
+		klog.Infof("Context done, cancelling remaining operations... %v", ctx.Err())
+		return ctx.Err()
 	}
 	return nil
 }
@@ -152,14 +144,24 @@ func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Cli
 	})
 }
 
-func logStream(r io.Reader, mu *sync.Mutex, prefix string, out io.Writer) {
+func logStream(r io.Reader, ch chan<- logEntry, prefix string, out io.Writer) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		text := scanner.Text()
-		mu.Lock()
-		_, _ = fmt.Fprintf(out, "%s %s\n", prefix, text)
-		mu.Unlock()
+		ch <- logEntry{prefix: prefix, text: scanner.Text(), out: out}
 	}
+}
+
+type logEntry struct {
+	prefix string
+	text   string
+	out    io.Writer
+}
+
+func logger(ch <-chan logEntry, done chan<- struct{}) {
+	for entry := range ch {
+		_, _ = fmt.Fprintf(entry.out, "%s %s\n", entry.prefix, entry.text)
+	}
+	done <- struct{}{}
 }
 
 // makeTar walks the source and writes a tarball to the writer
