@@ -25,6 +25,7 @@ var (
 	uploadDest     string
 	timeout        time.Duration
 	excludePattern string
+	useShell       bool
 )
 
 var RunCmd = &cobra.Command{
@@ -34,11 +35,18 @@ var RunCmd = &cobra.Command{
   krun run --label-selector=app=backend -- pip install -r requirements.txt
 
   # Upload files and run a script
-  krun run --label-selector=app=backend --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
+  krun run --label-selector=app=backend --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh
+
+  # Run shell commands with pipes, cd, or && using --shell flag
+  krun run --label-selector=app=backend --shell -- "cd /app && pip install -r requirements.txt"
+  krun run --label-selector=app=backend --shell -- "apt update && apt install -y vim"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmdArgs := []string{}
 		if cmd.ArgsLenAtDash() != -1 {
 			cmdArgs = args[cmd.ArgsLenAtDash():]
+		}
+		if useShell {
+			cmdArgs = exec.WrapCommandInShell(cmdArgs)
 		}
 		opts := Options{
 			Kubeconfig:     kubeconfig,
@@ -160,4 +168,5 @@ func init() {
 	RunCmd.Flags().StringVar(&uploadDest, "upload-dest", "", "Remote path (e.g. /tmp/app)")
 	RunCmd.Flags().StringVar(&excludePattern, "exclude", "", "Regex pattern to exclude files when uploading")
 	RunCmd.Flags().DurationVar(&timeout, "timeout", 0, "Timeout for the execution")
+	RunCmd.Flags().BoolVar(&useShell, "shell", false, "Wrap command with 'sh -c' to enable shell features like pipes, &&, ||, and cd")
 }

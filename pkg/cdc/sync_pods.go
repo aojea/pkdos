@@ -44,7 +44,7 @@ func SyncPods(ctx context.Context, config *rest.Config, client *kubernetes.Clien
 		return nil
 	}
 
-	// Start Hub on Leader	
+	// Start Hub on Leader
 	klog.Info("Starting hub on leader...")
 
 	// pipe to capture hub output

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -17,6 +18,19 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 )
+
+// WrapCommandInShell wraps the given command args in a shell invocation (sh -c "...")
+// This is useful when the command contains shell features like pipes, &&, ||, etc.
+// When using this function, users are expected to pass their command as a single quoted
+// string (e.g., "cd /app && pip install -r requirements.txt") which will be interpreted
+// by the shell. Multiple args are joined with spaces.
+func WrapCommandInShell(commandArgs []string) []string {
+	if len(commandArgs) == 0 {
+		return commandArgs
+	}
+	// Join all args with spaces and wrap with sh -c
+	return []string{"sh", "-c", strings.Join(commandArgs, " ")}
+}
 
 func ExecuteOnPods(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pods []corev1.Pod, commandArgs []string) error {
 	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods))
