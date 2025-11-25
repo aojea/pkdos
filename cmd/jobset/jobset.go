@@ -42,6 +42,7 @@ var (
 	timeout        time.Duration
 	excludePattern string
 	excludeRegex   *regexp.Regexp
+	useShell       bool
 	// launch subcommand flags
 	deviceType string
 	image      string
@@ -60,7 +61,11 @@ var RunSubcmd = &cobra.Command{
   krun jobset run --name=stoelinga -- pip install -r requirements.txt
 
   # Upload files and run a script
-  krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
+  krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh
+
+  # Run shell commands with pipes, cd, or && using --shell flag
+  krun jobset run --name=stoelinga --shell -- "cd /app && pip install -r requirements.txt"
+  krun jobset run --name=stoelinga --shell -- "apt update && apt install -y vim"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Validate inputs
 		if len(args) == 0 && uploadSrc == "" {
@@ -138,7 +143,7 @@ var RunSubcmd = &cobra.Command{
 			cmdArgs = args[cmd.ArgsLenAtDash():]
 		}
 
-		return exec.UploadAndExecuteOnPods(ctx, config, clientset, pods.Items, uploadSrc, uploadDest, excludeRegex, cmdArgs)
+		return exec.UploadAndExecuteOnPods(ctx, config, clientset, pods.Items, uploadSrc, uploadDest, excludeRegex, cmdArgs, useShell)
 	},
 }
 
@@ -218,6 +223,7 @@ func init() {
 	RunSubcmd.Flags().StringVar(&uploadDest, "upload-dest", "./", "Remote path (e.g. /tmp/app) (default is current directory)")
 	RunSubcmd.Flags().StringVar(&excludePattern, "exclude", regexpDefaultExclude, "Regex pattern to exclude files when uploading (default excludes all hidden files and folders)")
 	RunSubcmd.Flags().DurationVar(&timeout, "timeout", 0, "Timeout for the execution")
+	RunSubcmd.Flags().BoolVar(&useShell, "shell", false, "Wrap command with 'sh -c' to enable shell features like pipes, &&, ||, and cd")
 
 	JobSetCmd.AddCommand(LaunchSubcmd)
 	LaunchSubcmd.Flags().StringVar(&deviceType, "device-type", "tpu-7x-16", "Type of accelerator to launch (e.g. tpu-7x-16, gpu-l4-1)")

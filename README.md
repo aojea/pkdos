@@ -26,6 +26,7 @@ The `run` subcommand executes a command or uploads files to all pods matching a 
 | `--upload-dest` | Remote destination path (e.g., `/tmp/app`). **Required if** `--upload-src` is set. | |
 | `--exclude` | Regex pattern to exclude files when uploading. | |
 | `--timeout` | Timeout for the execution (e.g., `30s`). | 0 (no timeout) |
+| `--shell` | Wrap command with `sh -c` to enable shell features (pipes, `&&`, `cd`, etc.). | false |
 
 #### Parallel Command Execution
 
@@ -38,6 +39,21 @@ Execute a shell command on all matching pods. The command to run is passed after
 # Output includes pod names as prefix
 [krun-test-web-1] krun-test-web-1
 [krun-test-web-0] krun-test-web-0
+```
+
+#### Running Shell Commands (Pipes, cd, &&, etc.)
+
+When you need to use shell features like `cd`, `&&`, `||`, or pipes (`|`), use the `--shell` flag. This wraps your command with `sh -c`, enabling full shell interpretation.
+
+```sh
+# Change directory and install dependencies
+./bin/krun run --label-selector=app=backend --shell -- "cd /app && pip install -r requirements.txt"
+
+# Chain multiple commands
+./bin/krun run --label-selector=app=backend --shell -- "apt update && apt install -y vim"
+
+# Use pipes
+./bin/krun run --label-selector=app=backend --shell -- "cat /etc/passwd | grep root"
 ```
 
 #### File Synchronization (Upload)
@@ -78,6 +94,7 @@ Works like `krun run`, but targets pods belonging to a specific JobSet identifie
 | :--- | :--- | :--- |
 | `-j, --name` | **Name of the JobSet** to target. **Required**. | |
 | `--exclude` | Regex pattern to exclude files/folders. | `(^|/)\.` (excludes all hidden files and folders) |
+| `--shell` | Wrap command with `sh -c` to enable shell features (pipes, `&&`, `cd`, etc.). | false |
 
 ```sh
 # Run a command on pods belonging to a JobSet named 'stoelinga'
@@ -89,6 +106,10 @@ krun jobset run \
   --upload-src=./bin \
   --upload-dest=/tmp/bin \
   -- /tmp/bin/start.sh
+
+# Run shell commands with pipes, cd, or && using --shell flag
+krun jobset run --name=stoelinga --shell -- "cd /app && pip install -r requirements.txt"
+krun jobset run --name=stoelinga --shell -- "apt update && apt install -y vim"
 ```
 
 #### `krun jobset launch` (Launch a JobSet)
