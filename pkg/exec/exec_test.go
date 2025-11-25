@@ -52,36 +52,3 @@ func TestWrapCommandInShell(t *testing.T) {
 		})
 	}
 }
-
-func TestJoinCommand(t *testing.T) {
-	tests := []struct {
-		name     string
-		args     []string
-		expected string
-	}{
-		{
-			name:     "empty args",
-			args:     []string{},
-			expected: "",
-		},
-		{
-			name:     "single arg",
-			args:     []string{"hostname"},
-			expected: "hostname",
-		},
-		{
-			name:     "multiple args",
-			args:     []string{"pip", "install", "-r", "requirements.txt"},
-			expected: "pip install -r requirements.txt",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := joinCommand(tt.args)
-			if result != tt.expected {
-				t.Errorf("joinCommand(%v) = %v, want %v", tt.args, result, tt.expected)
-			}
-		})
-	}
-}

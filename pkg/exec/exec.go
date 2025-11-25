@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,29 +22,15 @@ import (
 
 // WrapCommandInShell wraps the given command args in a shell invocation (sh -c "...")
 // This is useful when the command contains shell features like pipes, &&, ||, etc.
+// When using this function, users are expected to pass their command as a single quoted
+// string (e.g., "cd /app && pip install -r requirements.txt") which will be interpreted
+// by the shell. Multiple args are joined with spaces.
 func WrapCommandInShell(commandArgs []string) []string {
 	if len(commandArgs) == 0 {
 		return commandArgs
 	}
 	// Join all args with spaces and wrap with sh -c
-	return []string{"sh", "-c", joinCommand(commandArgs)}
-}
-
-// joinCommand joins command arguments into a single string,
-// properly handling arguments that may contain spaces
-func joinCommand(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	if len(args) == 1 {
-		return args[0]
-	}
-	// Join with spaces - the shell will parse the command
-	result := args[0]
-	for i := 1; i < len(args); i++ {
-		result += " " + args[i]
-	}
-	return result
+	return []string{"sh", "-c", strings.Join(commandArgs, " ")}
 }
 
 func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pods []corev1.Pod, uploadSrc, uploadDest string, excludeRegex *regexp.Regexp, commandArgs []string, useShell bool) error {
