@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,7 +20,20 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pods []corev1.Pod, uploadSrc, uploadDest string, excludeRegex *regexp.Regexp, commandArgs []string) error {
+// WrapCommandInShell wraps the given command args in a shell invocation (sh -c "...")
+// This is useful when the command contains shell features like pipes, &&, ||, etc.
+// When using this function, users are expected to pass their command as a single quoted
+// string (e.g., "cd /app && pip install -r requirements.txt") which will be interpreted
+// by the shell. Multiple args are joined with spaces.
+func WrapCommandInShell(commandArgs []string) []string {
+	if len(commandArgs) == 0 {
+		return commandArgs
+	}
+	// Join all args with spaces and wrap with sh -c
+	return []string{"sh", "-c", strings.Join(commandArgs, " ")}
+}
+
+func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pods []corev1.Pod, uploadSrc, uploadDest string, excludeRegex *regexp.Regexp, commandArgs []string, useShell bool) error {
 
 	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods))
 	ctx, cancel := context.WithCancel(ctx)
@@ -90,8 +104,14 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				go logStream(ctx, prOut, logCh, prefix, os.Stdout)
 				go logStream(ctx, prErr, logCh, prefix, os.Stderr)
 
+				// Apply shell wrapping if requested
+				execArgs := commandArgs
+				if useShell {
+					execArgs = WrapCommandInShell(commandArgs)
+				}
+
 				// Execute
-				err := execCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
+				err := execCmd(ctx, config, clientset, p, execArgs, nil, pwOut, pwErr)
 
 				_ = pwOut.Close()
 				_ = pwErr.Close()
