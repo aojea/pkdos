@@ -61,7 +61,7 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				// 1. Create destination directory
 				mkdirCmd := []string{"mkdir", "-p", uploadDest}
 				// We must provide at least one stream (stdin, stdout, stderr) for k8s exec.
-				err := execCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
+				err := ExecCmd(ctx, config, clientset, p, mkdirCmd, nil, io.Discard, nil)
 				if err != nil {
 					logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Mkdir Error: %v", err), out: os.Stderr}
 					// If mkdir fails, we stop
@@ -72,7 +72,7 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				tarCmd := []string{"tar", "-xmf", "-", "-C", uploadDest}
 
 				// Pass 'pr' as Stdin
-				err = execCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
+				err = ExecCmd(ctx, config, clientset, p, tarCmd, pr, nil, nil)
 				if err != nil {
 					logCh <- logEntry{prefix: prefix, text: fmt.Sprintf("Transfer Error: %v", err), out: os.Stderr}
 					// If upload fails, we probably shouldn't run the command
@@ -91,7 +91,7 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 				go logStream(ctx, prErr, logCh, prefix, os.Stderr)
 
 				// Execute
-				err := execCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
+				err := ExecCmd(ctx, config, clientset, p, commandArgs, nil, pwOut, pwErr)
 
 				_ = pwOut.Close()
 				_ = pwErr.Close()
@@ -115,7 +115,7 @@ func UploadAndExecuteOnPods(ctx context.Context, config *rest.Config, clientset 
 	return nil
 }
 
-func execCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pod corev1.Pod, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+func ExecCmd(ctx context.Context, config *rest.Config, clientset *kubernetes.Clientset, pod corev1.Pod, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	req := clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod.Name).

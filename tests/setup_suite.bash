@@ -6,7 +6,7 @@ function setup_suite {
   export BATS_TEST_TIMEOUT=120
   echo "Building krun binary..."
   (cd "$BATS_TEST_DIRNAME/.." && make build)
-  
+
   # Define the name of the kind cluster
   export CLUSTER_NAME="test-cluster"
   if kind get clusters | grep -q "^${CLUSTER_NAME}$"; then
@@ -16,18 +16,13 @@ function setup_suite {
     return
   fi
   # Create cluster
-  cat <<EOF | kind create cluster \
-    --name $CLUSTER_NAME \
-    -v7 --wait 1m --retain --config=-
-  kind: Cluster
-  apiVersion: kind.x-k8s.io/v1alpha4
-  networking:
-    ipFamily: dual
-  nodes:
-  - role: control-plane
-  - role: worker
-  - role: worker
-EOF
+  kind create cluster --config "$BATS_TEST_DIRNAME/kind.yaml" --name "$CLUSTER_NAME" --wait 1m --retain
+
+  echo "Building krun image..."
+  (cd "$BATS_TEST_DIRNAME/.." && TAG=test make image-build)
+
+  echo "Pushing krun image..."
+  kind load docker-image "ghcr.io/aojea/krun-agent:$TAG" --name "$CLUSTER_NAME"
 }
 
 function teardown_suite {
