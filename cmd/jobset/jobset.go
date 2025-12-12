@@ -3,12 +3,11 @@ package jobset
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/aojea/krun/pkg/clientset"
 	"github.com/aojea/krun/pkg/exec"
 	"github.com/spf13/cobra"
 	batchv1 "k8s.io/api/batch/v1"
@@ -16,10 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
 	"k8s.io/klog/v2"
 
 	jobsetapi "sigs.k8s.io/jobset/api/jobset/v1alpha2"
@@ -98,24 +93,9 @@ var RunSubcmd = &cobra.Command{
 		// Defer error handling for the metrics server
 		defer runtime.HandleCrash()
 
-		var config *rest.Config
-		var err error
-		if kubeconfig == "" {
-			if home := homedir.HomeDir(); home != "" {
-				kubeconfig = filepath.Join(home, ".kube", "config")
-			} else {
-				kubeconfig = os.Getenv("KUBECONFIG")
-			}
-		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		config, clientset, err := clientset.GetClient(kubeconfig)
 		if err != nil {
-			klog.Fatalf("can not create client-go configuration: %v", err)
-		}
-
-		// creates the clientset
-		clientset, err := kubernetes.NewForConfig(config)
-		if err != nil {
-			klog.Fatalf("can not create client-go client: %v", err)
+			return err
 		}
 
 		klog.V(2).Infof("Listing pods in namespace %q with selector %q", namespace, labelSelector)
@@ -123,7 +103,7 @@ var RunSubcmd = &cobra.Command{
 			LabelSelector: labelSelector,
 		})
 		if err != nil {
-			klog.Fatalf("failed to get pods: %v", err)
+			return fmt.Errorf("failed to get pods: %w", err)
 		}
 
 		if len(pods.Items) == 0 {
@@ -177,19 +157,10 @@ var LaunchSubcmd = &cobra.Command{
 		// Defer error handling for the metrics server
 		defer runtime.HandleCrash()
 
-		var config *rest.Config
-		if kubeconfig == "" {
-			if home := homedir.HomeDir(); home != "" {
-				kubeconfig = filepath.Join(home, ".kube", "config")
-			} else {
-				kubeconfig = os.Getenv("KUBECONFIG")
-			}
-		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		config, _, err := clientset.GetClient(kubeconfig)
 		if err != nil {
-			klog.Fatalf("can not create client-go configuration: %v", err)
+			return err
 		}
-
 		// creates the clientset
 		clientset, err := jobsetclient.NewForConfig(config)
 		if err != nil {
