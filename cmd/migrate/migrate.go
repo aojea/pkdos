@@ -2,304 +2,289 @@ package migrate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aojea/krun/pkg/clientset"
-	"github.com/aojea/krun/pkg/exec"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 )
 
+const defaultBuilderImage = "ghcr.io/aojea/krun-agent:latest"
+
 var (
-	kubeconfig   string
-	namespace    string
-	container    string
-	selector     string
-	keepOld      bool
-	builderImage string
+	kubeconfig    string
+	namespace     string
+	container     string
+	selector      string
+	keepOld       bool
+	builderImage  string
+	snapshotImage string
 )
 
 var MigrateCmd = &cobra.Command{
-	Use:   "migrate [POD_NAME] [SNAPSHOT_IMAGE]",
+	Use:   "migrate [POD_NAME]",
 	Short: "Live-migrate a pod to a new image using checkpointing",
-	Args:  cobra.ExactArgs(2),
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		podName := args[0]
-		snapshotImage := args[1]
 		ctx := cmd.Context()
 
 		// 1. Setup Clientset
-		config, clientset, err := clientset.GetClient(kubeconfig)
+		_, clientset, err := clientset.GetClient(kubeconfig)
 		if err != nil {
 			return err
 		}
 
-		// 2. Pre-flight checks
+		// 2. Pre-flight checks & Source Info
 		klog.Infof("🔍 Pre-flight checks for pod %s/%s...", namespace, podName)
-		targetPod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		sourcePod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get pod: %w", err)
 		}
 
-		nodeName := targetPod.Spec.NodeName
-		if nodeName == "" {
+		sourceNode := sourcePod.Spec.NodeName
+		if sourceNode == "" {
 			return fmt.Errorf("pod is not scheduled on a node")
 		}
 
-		// 3. Identify Target Containers
-		var targetContainers []string
-		if container != "" {
-			found := false
-			for _, c := range targetPod.Spec.Containers {
-				if c.Name == container {
-					found = true
+		// Identify Target Container (Single container support for now, or loop?)
+		// The Agent 'send' command currently takes ONE container ID.
+		// The Agent 'receive' command takes ONE container name.
+		// We will assume single container migration for now or migrated sequentially.
+		// Logic: If multiple containers, we might need multiple streams or sequential.
+		// Let's stick to the first found container or the specified one.
+		targetContainerName := container
+		if targetContainerName == "" {
+			if len(sourcePod.Spec.Containers) > 0 {
+				targetContainerName = sourcePod.Spec.Containers[0].Name // Default to first
+			}
+		}
+
+		// Find Container ID
+		var sourceContainerID string
+		for _, status := range sourcePod.Status.ContainerStatuses {
+			if status.Name == targetContainerName {
+				// Format: containerd://<id>
+				parts := strings.Split(status.ContainerID, "://")
+				if len(parts) == 2 {
+					sourceContainerID = parts[1]
+				}
+				break
+			}
+		}
+		if sourceContainerID == "" {
+			return fmt.Errorf("failed to find container ID for %s (is it running?)", targetContainerName)
+		}
+
+		klog.Infof("📍 Source: %s on %s (ID: %s)", podName, sourceNode, sourceContainerID)
+
+		// 3. Create Destination Pod (Mirror)
+		destPodName := fmt.Sprintf("%s-migrated", podName)
+		klog.Infof("🚀 Creating Destination Pod %s...", destPodName)
+
+		destPod := sourcePod.DeepCopy()
+		destPod.Name = destPodName
+		destPod.ResourceVersion = ""
+		destPod.UID = ""
+		destPod.CreationTimestamp = metav1.Time{}
+		destPod.Status = corev1.PodStatus{}
+		destPod.Spec.NodeName = "" // Let scheduler pick (or use selector)
+
+		// Add Init Container Gate
+		// We'll invoke a blocking command.
+		// Name must be "migration-gate" as expected by Agent Receive logic.
+		initContainer := corev1.Container{
+			Name:  "migration-gate",
+			Image: "busybox", // We assume busybox is available or we use builderImage?
+			// Using builderImage (krun-agent) is safer as we know we have it?
+			// But krun-agent might be large? It's Debian based.
+			// Let's use builderImage (Agent) as it's guaranteed to be pulled by us.
+			Command: []string{"/bin/sh", "-c", "echo 'Blocking for migration...'; sleep infinity"},
+		}
+		// Prepend Init Container
+		destPod.Spec.InitContainers = append([]corev1.Container{initContainer}, destPod.Spec.InitContainers...)
+
+		// Update image if snapshotImage is provided
+		if snapshotImage != "" {
+			for i := range destPod.Spec.Containers {
+				if destPod.Spec.Containers[i].Name == targetContainerName {
+					destPod.Spec.Containers[i].Image = snapshotImage
 					break
 				}
 			}
-			if !found {
-				return fmt.Errorf("container %q not found in pod", container)
-			}
-			targetContainers = []string{container}
-		} else {
-			for _, c := range targetPod.Spec.Containers {
-				targetContainers = append(targetContainers, c.Name)
-			}
-			klog.Infof("ℹ️  Migrating all containers: %v", targetContainers)
 		}
 
-		klog.Infof("📍 Target: %s / %v on node %s", podName, targetContainers, nodeName)
+		// Handle Selector
+		if selector != "" {
+			parts := strings.Split(selector, "=")
+			if len(parts) == 2 {
+				if destPod.Spec.NodeSelector == nil {
+					destPod.Spec.NodeSelector = make(map[string]string)
+				}
+				destPod.Spec.NodeSelector[parts[0]] = parts[1]
+			}
+		}
 
-		// 4. Create Builder Pod
-		builderPodName := fmt.Sprintf("migrator-builder-%d", rand.Intn(100000))
-		builderPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      builderPodName,
-				Namespace: namespace,
-			},
+		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, destPod, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create destination pod: %w", err)
+		}
+
+		// Wait for Scheduling (to know Dest Node)
+		klog.Infof("⏳ Waiting for Destination Pod scheduling...")
+		var destNode string
+		// var destPodIP string // Removed unused variable
+
+		// We wait for it to be assigned a Node. It might be stuck in Init:0/1, which is GOOD.
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+			p, err := clientset.CoreV1().Pods(namespace).Get(ctx, destPodName, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			if p.Spec.NodeName != "" {
+				destNode = p.Spec.NodeName
+				// destPodIP = p.Status.PodIP
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			return fmt.Errorf("timeout waiting for destination pod scheduling: %w", err)
+		}
+
+		// 4. Start Receiver Agent (On Dest Node)
+		receivePort := "9000" // Make flag?
+		receiverPodName := fmt.Sprintf("migrator-receiver-%s", destNode)
+		receiverPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: receiverPodName, Namespace: namespace},
 			Spec: corev1.PodSpec{
-				NodeName:      nodeName,
+				NodeName:      destNode,
 				RestartPolicy: corev1.RestartPolicyNever,
+				HostNetwork:   true, // Needed to listen on Node IP
 				Containers: []corev1.Container{
 					{
-						Name:    "builder",
-						Image:   builderImage,
-						Command: []string{"/bin/sh", "-c", "cp $(command -v criu) /host/usr/local/bin/criu && sleep 900"},
-						SecurityContext: &corev1.SecurityContext{
-							Privileged: func(b bool) *bool { return &b }(true),
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "h", MountPath: "/host"},
+						Name:            "receiver",
+						Image:           builderImage,
+						Command:         []string{"/usr/local/bin/krun-agent", "migrate-agent", "receive", "--port", receivePort, "--pod-name", destPodName, "--container-name", targetContainerName, "--socket", "/run/containerd/containerd.sock"},
+						SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)},
+						VolumeMounts:    []corev1.VolumeMount{
+							{Name: "run", MountPath: "/run/containerd"}, 
+							{Name: "varlib", MountPath: "/var/lib/containerd"},
 						},
 					},
 				},
 				Volumes: []corev1.Volume{
-					{
-						Name: "h",
-						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{
-								Path: "/",
-								Type: ptr.To(corev1.HostPathDirectory),
-							},
-						},
-					},
+					{Name: "run", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
+					{Name: "varlib", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd"}}},
 				},
 			},
 		}
 
-		klog.Infof("🚀 Pre-warming builder (%s)...", builderPodName)
-		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, builderPod, metav1.CreateOptions{})
+		klog.Infof("🎧 Starting Receiver Agent on %s...", destNode)
+		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, receiverPod, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to create builder pod: %w", err)
+			return fmt.Errorf("failed to start receiver: %w", err)
 		}
-
-		// Ensure cleanup
 		defer func() {
-			klog.Infof("🧹 Cleaning up builder pod and injected binaries...")
-			// Try to remove the injected binary using the builder pod if it's still running
-			if err := exec.ExecCmd(ctx, config, clientset, *builderPod, []string{"rm", "-f", "/host/usr/local/bin/criu"}, nil, io.Discard, io.Discard); err != nil {
-				klog.V(2).Infof("failed to cleanup criu binary: %v", err)
-			}
-			_ = clientset.CoreV1().Pods(namespace).Delete(context.Background(), builderPodName, metav1.DeleteOptions{
-				GracePeriodSeconds: ptr.To(int64(0)),
-			})
+			klog.Infof("🧹 Cleaning up receiver...")
+			clientset.CoreV1().Pods(namespace).Delete(context.Background(), receiverPodName, metav1.DeleteOptions{})
 		}()
 
-		// Wait for builder ready
-		klog.Info("⏳ Waiting for builder...")
-		if err := waitForPodReady(ctx, clientset, namespace, builderPodName); err != nil {
-			return fmt.Errorf("builder pod failed to start: %w", err)
-		}
-
-		// 5. Trigger Checkpoints (Sequential for safety)
-		containerCheckpoints := make(map[string]string)
-		for _, cName := range targetContainers {
-			klog.Infof("📸 TRIGGERING CHECKPOINT for container %s...", cName)
-			// Path: /api/v1/nodes/$NODE/proxy/checkpoint/$NAMESPACE/$POD_NAME/$CONTAINER_NAME
-			path := fmt.Sprintf("api/v1/nodes/%s/proxy/checkpoint/%s/%s/%s", nodeName, namespace, podName, cName)
-
-			resultRaw, err := clientset.CoreV1().RESTClient().Post().
-				AbsPath(path).
-				SetHeader("Content-Type", "application/json").
-				Body([]byte("{}")).
-				DoRaw(ctx)
+		// Wait for Receiver to be Running
+		var destNodeIP string
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+			p, err := clientset.CoreV1().Pods(namespace).Get(ctx, receiverPodName, metav1.GetOptions{})
 			if err != nil {
-				return fmt.Errorf("checkpoint request failed for container %s: %w", cName, err)
+				return false, nil
 			}
-
-			var cpResult struct {
-				Items []string `json:"items"`
+			if p.Status.PodIP == "" {
+				return false, nil
 			}
-			if err := json.Unmarshal(resultRaw, &cpResult); err != nil {
-				return fmt.Errorf("failed to parse checkpoint response for container %s: %w", cName, err)
-			}
-			if len(cpResult.Items) == 0 {
-				return fmt.Errorf("no checkpoint items returned for container %s: %s", cName, string(resultRaw))
-			}
-			checkpointPath := cpResult.Items[0]
-			containerCheckpoints[cName] = checkpointPath
-			klog.Infof("✅ Saved %s: %s", cName, checkpointPath)
+			// host network pod IPs are the node IPs
+			destNodeIP = p.Status.PodIP
+			return true, nil
+		})
+		if err != nil {
+			return fmt.Errorf("timeout waiting for receiver pod to start: %w", err)
 		}
 
-		// 6. Parallel Execution (Push & Schedule)
-		klog.Info("⚡ ENTERING PARALLEL EXECUTION MODE")
+		klog.Infof("✅ Destination Scheduled: %s on %s (%s)", destPodName, destNode, destNodeIP)
 
-		var wg sync.WaitGroup
-		// errChan capacity: Thread A (one per container) + Thread B (schedule)
-		errChan := make(chan error, len(targetContainers)+1)
-
-		// Thread A: Image Build & Push (One goroutine per container)
-		for _, cName := range targetContainers {
-			wg.Add(1)
-			go func(cName string) {
-				defer wg.Done()
-				klog.Infof("   [Thread A-%s] 📦 Packaging & Pushing Image...", cName)
-
-				// Determine Target Image
-				// If multiple containers, append suffix.
-				// If single container (even if implicitly selected), keep original.
-				finalSnapshotImage := snapshotImage
-				if len(targetContainers) > 1 {
-					finalSnapshotImage = fmt.Sprintf("%s-%s", snapshotImage, cName)
-				}
-
-				checkpointPath := containerCheckpoints[cName]
-
-				// Build script to run inside the builder pod
-				remoteScript := fmt.Sprintf(`
-set -e
-if ! buildah login --get-login %s >/dev/null 2>&1; then echo 'Warn: No auth for registry'; fi
-ctr=$(buildah from scratch)
-buildah add "$ctr" "/host%s" /
-buildah config --annotation=org.criu.checkpoint.container.name=restored "$ctr"
-buildah commit "$ctr" "%s"
-buildah push "%s"
-`, finalSnapshotImage, checkpointPath, finalSnapshotImage, finalSnapshotImage)
-
-				// Execute using the exported ExecCmd from pkg/exec
-				// We discard stdout/stderr unless there is an error to keep output clean,
-				// or we can stream it if verbose. For now, we print logs on error.
-				cmd := []string{"/bin/sh", "-c", remoteScript}
-
-				// We can pipe output to os.Stdout to show buildah progress
-				if err := exec.ExecCmd(ctx, config, clientset, *builderPod, cmd, nil, os.Stdout, os.Stderr); err != nil {
-					klog.Errorf("   [Thread A-%s] ❌ Image Push Failed: %v", cName, err)
-					errChan <- fmt.Errorf("image push failed for %s: %w", cName, err)
-					return
-				}
-				klog.Infof("   [Thread A-%s] ✅ Image Push Complete (%s).", cName, finalSnapshotImage)
-			}(cName)
+		// 5. Start Sender Agent (On Source Node)
+		// We launch it to run 'send' command.
+		senderPodName := fmt.Sprintf("migrator-sender-%s", sourceNode)
+		senderPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: senderPodName, Namespace: namespace},
+			Spec: corev1.PodSpec{
+				NodeName:      sourceNode,
+				RestartPolicy: corev1.RestartPolicyNever,
+				HostNetwork:   true,
+				Containers: []corev1.Container{
+					{
+						Name:            "sender",
+						Image:           builderImage,
+						Command:         []string{"/usr/local/bin/krun-agent", "migrate-agent", "send", "--container-id", sourceContainerID, "--target-ip", destNodeIP, "--port", receivePort, "--socket", "/run/containerd/containerd.sock"},
+						SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)},
+						VolumeMounts:    []corev1.VolumeMount{{Name: "run", MountPath: "/run/containerd"}, {Name: "varlib", MountPath: "/var/lib/containerd"}},
+					},
+				},
+				Volumes: []corev1.Volume{
+					{Name: "run", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
+					{Name: "varlib", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd"}}},
+				},
+			},
 		}
 
-		// Thread B: Schedule New Pod
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			klog.Infof("   [Thread B] 🚀 Scheduling new Pod %s-migrated...", podName)
-
-			// Construct new Pod
-			newPod := targetPod.DeepCopy()
-			newPod.Name = fmt.Sprintf("%s-migrated", podName)
-			newPod.ResourceVersion = ""
-			newPod.UID = ""
-			newPod.CreationTimestamp = metav1.Time{}
-			newPod.Status = corev1.PodStatus{}
-			newPod.OwnerReferences = nil
-			newPod.Spec.NodeName = "" // Clear node name to allow rescheduling
-
-			// Update Images
-			// We must apply the SAME naming logic here
-			targetImage := snapshotImage // Use snapshotImage as base
-			for i, c := range newPod.Spec.Containers {
-				// check if this container was migrated
-				isTarget := false
-				for _, t := range targetContainers {
-					if t == c.Name {
-						isTarget = true
-						break
-					}
-				}
-
-				if isTarget {
-					finalTargetImage := targetImage
-					if len(targetContainers) > 1 {
-						finalTargetImage = fmt.Sprintf("%s-%s", targetImage, c.Name)
-					}
-					newPod.Spec.Containers[i].Image = finalTargetImage
-				}
-			}
-
-			// Handle Node Selector
-			if selector != "" {
-				parts := strings.Split(selector, "=")
-				if len(parts) == 2 {
-					if newPod.Spec.NodeSelector == nil {
-						newPod.Spec.NodeSelector = make(map[string]string)
-					}
-					newPod.Spec.NodeSelector[parts[0]] = parts[1]
-				}
-			}
-
-			// Delete old pod if requested (Non-blocking usually, but here we just trigger it)
-			if !keepOld {
-				klog.Info("   [Thread B] 🗑️  Deleting old pod...")
-				zero := int64(0)
-				_ = clientset.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
-					GracePeriodSeconds: &zero,
-				})
-			}
-
-			// Apply new manifest
-			_, err := clientset.CoreV1().Pods(namespace).Create(ctx, newPod, metav1.CreateOptions{})
-			if err != nil {
-				klog.Errorf("   [Thread B] ❌ Failed to create new pod: %v", err)
-				errChan <- fmt.Errorf("failed to create new pod: %w", err)
-				return
-			}
-			klog.Info("   [Thread B] ⏳ Pod created. Kubelet is now polling for image...")
+		klog.Infof("📤 Starting Sender Agent on %s...", sourceNode)
+		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, senderPod, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to start sender: %w", err)
+		}
+		defer func() {
+			klog.Infof("🧹 Cleaning up sender...")
+			clientset.CoreV1().Pods(namespace).Delete(context.Background(), senderPodName, metav1.DeleteOptions{})
 		}()
 
-		wg.Wait()
-		close(errChan)
-
-		// Check for errors
-		for e := range errChan {
-			if e != nil {
-				return e
+		// Wait for Sender to Complete (Success or Fail)
+		klog.Info("⏳ Waiting for Migration to complete...")
+		// We watch the Sender pod status. If it succeeds (Completed), we assume migration done.
+		// If Receiver fails, Sender should fail (connection broken).
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+			p, err := clientset.CoreV1().Pods(namespace).Get(ctx, senderPodName, metav1.GetOptions{})
+			if err != nil {
+				return false, err
 			}
+			if p.Status.Phase == corev1.PodSucceeded {
+				return true, nil
+			}
+			if p.Status.Phase == corev1.PodFailed {
+				// Retrieve logs
+				logs, _ := getPodLogs(ctx, clientset, namespace, senderPodName)
+				return false, fmt.Errorf("sender failed: %s", logs)
+			}
+			return false, nil
+		})
+		if err != nil {
+			return fmt.Errorf("migration wait failed: %w", err)
 		}
 
-		klog.Info("🎉 Migration Complete!")
+		klog.Info("🎉 Migration Stream Complete!")
+
+		// Cleanup Old Pod
+		if !keepOld {
+			klog.Info("🗑️  Deleting old pod...")
+			_ = clientset.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: ptr.To(int64(0))})
+		}
+
 		return nil
 	},
 }
@@ -310,25 +295,25 @@ func init() {
 	MigrateCmd.Flags().StringVarP(&container, "container", "c", "", "Specific container to checkpoint (default: all containers)")
 	MigrateCmd.Flags().StringVarP(&selector, "selector", "s", "", "Node selector for new pod (e.g. 'disktype=ssd')")
 	MigrateCmd.Flags().BoolVar(&keepOld, "keep-old", false, "Do not delete old pod")
-	MigrateCmd.Flags().StringVar(&builderImage, "builder-image", "ghcr.io/aojea/krun-migrate:v0.0.1", "Image used for the builder pod")
+	MigrateCmd.Flags().StringVar(&builderImage, "builder-image", defaultBuilderImage, "Image used for the builder pod")
+	MigrateCmd.Flags().StringVar(&snapshotImage, "snapshot-image", "", "Image name for the checkpoint snapshot")
 	if env := os.Getenv("BUILDER_IMAGE"); env != "" {
 		builderImage = env
 	}
 }
 
-func waitForPodReady(ctx context.Context, clientset *kubernetes.Clientset, ns, name string) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(1 * time.Second):
-			p, err := clientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-			if err != nil {
-				return err
-			}
-			if p.Status.Phase == corev1.PodRunning {
-				return nil
-			}
-		}
+func getPodLogs(ctx context.Context, clientset *kubernetes.Clientset, ns, name string) (string, error) {
+	req := clientset.CoreV1().Pods(ns).GetLogs(name, &corev1.PodLogOptions{})
+	podLogs, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
 	}
+	defer podLogs.Close()
+
+	buf := new(strings.Builder)
+	_, err = io.Copy(buf, podLogs)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }

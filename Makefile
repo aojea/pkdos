@@ -6,10 +6,14 @@ GO111MODULE=on
 CGO_ENABLED=0
 export GO111MODULE CGO_ENABLED
 
-.PHONY: all build 
+.PHONY: all build build-agent
 build: 
 	@echo "Building all binaries..."
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ./bin/krun .
+
+build-agent:
+	@echo "Building agent binary..."
+	cd agent && GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ../bin/krun-agent .
 
 clean:
 	rm -rf "$(OUT_DIR)/"
@@ -22,6 +26,7 @@ lint:
 
 update:
 	go mod tidy
+	cd agent && go mod tidy
 
 
 .PHONY: ensure-buildx
