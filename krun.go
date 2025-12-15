@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 
 	"github.com/aojea/krun/cmd/jobset"
+	"github.com/aojea/krun/cmd/migrate"
 	"github.com/aojea/krun/cmd/run"
 
 	"k8s.io/klog/v2"
@@ -21,9 +25,12 @@ func main() {
 	rootCmd.AddCommand(run.RunCmd)
 	// jobset works on Pods belonging to a JobSet
 	rootCmd.AddCommand(jobset.JobSetCmd)
+	// migrate works on Pods to live-migrate them
+	rootCmd.AddCommand(migrate.MigrateCmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 }
