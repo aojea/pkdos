@@ -30,7 +30,6 @@ func main() {
 	// jobset works on Pods belonging to a JobSet
 	rootCmd.AddCommand(jobset.JobSetCmd)
 
-
 	ctx, cancel := signal.NotifyContext(
 		context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

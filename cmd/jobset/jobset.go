@@ -1,14 +1,12 @@
 package jobset
 
 import (
-	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/aojea/krun/cmd/run"
 	"github.com/aojea/krun/pkg/clientset"
-	"github.com/aojea/krun/pkg/exec"
 	"github.com/spf13/cobra"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +21,7 @@ import (
 )
 
 const (
-	regexpDefaultExclude = `(^|/)\.`
+	DefaultExclude = `(^|/)\.`
 )
 
 // Global variables for flags
@@ -36,12 +34,13 @@ var (
 	uploadDest     string
 	timeout        time.Duration
 	excludePattern string
-	excludeRegex   *regexp.Regexp
+
 	// launch subcommand flags
 	deviceType string
 	image      string
 	dryRun     bool
 	numSlices  int
+	mirror     bool
 )
 
 var JobSetCmd = &cobra.Command{
@@ -57,68 +56,28 @@ var RunSubcmd = &cobra.Command{
   # Upload files and run a script
   krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate inputs
-		if len(args) == 0 && uploadSrc == "" {
-			klog.Fatal("You must provide either a command (as arguments) or --upload-src (or both)")
-		}
-		if uploadSrc != "" && uploadDest == "" {
-			klog.Fatal("If --upload-src is provided, --upload-dest is required")
-		}
-
 		if name == "" {
 			klog.Fatal("You must provide a --jobset-name to select target pods")
 		}
 		labelSelector := jobsetapi.JobSetNameKey + "=" + name
-
-		// Compile exclude regex if provided
-		if excludePattern != "" {
-			var err error
-			excludeRegex, err = regexp.Compile(excludePattern)
-			if err != nil {
-				klog.Fatalf("Invalid exclude pattern: %v", err)
-			}
-		}
-
-		// Setup Context
-		rootCtx := cmd.Context()
-		var ctx context.Context
-		var ctxCancel context.CancelFunc
-		if timeout > 0 {
-			ctx, ctxCancel = context.WithTimeout(rootCtx, timeout)
-		} else {
-			ctx, ctxCancel = context.WithCancel(rootCtx)
-		}
-		defer ctxCancel()
-
-		// Defer error handling for the metrics server
-		defer runtime.HandleCrash()
-
-		config, clientset, err := clientset.GetClient(kubeconfig)
-		if err != nil {
-			return err
-		}
-
-		klog.V(2).Infof("Listing pods in namespace %q with selector %q", namespace, labelSelector)
-		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to get pods: %w", err)
-		}
-
-		if len(pods.Items) == 0 {
-			klog.Infoln("No pods found with selector:", labelSelector)
-			return nil
-		}
-
-		klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods.Items))
 
 		cmdArgs := []string{}
 		if cmd.ArgsLenAtDash() != -1 {
 			cmdArgs = args[cmd.ArgsLenAtDash():]
 		}
 
-		return exec.UploadAndExecuteOnPods(ctx, config, clientset, pods.Items, uploadSrc, uploadDest, excludeRegex, cmdArgs)
+		opts := run.Options{
+			Kubeconfig:     kubeconfig,
+			Namespace:      namespace,
+			LabelSelector:  labelSelector,
+			UploadSrc:      uploadSrc,
+			UploadDest:     uploadDest,
+			ExcludePattern: excludePattern,
+			Timeout:        timeout,
+			CmdArgs:        cmdArgs,
+		}
+
+		return run.Run(cmd.Context(), opts)
 	},
 }
 
@@ -185,10 +144,11 @@ func init() {
 
 	// Subcommand to run commands/upload files to pods in the JobSet
 	JobSetCmd.AddCommand(RunSubcmd)
-	RunSubcmd.Flags().StringVar(&uploadSrc, "upload-src", "./", "Local path to folder/file to upload (default is current directory)")
-	RunSubcmd.Flags().StringVar(&uploadDest, "upload-dest", "./", "Remote path (e.g. /tmp/app) (default is current directory)")
-	RunSubcmd.Flags().StringVar(&excludePattern, "exclude", regexpDefaultExclude, "Regex pattern to exclude files when uploading (default excludes all hidden files and folders)")
+	RunSubcmd.Flags().StringVar(&uploadSrc, "upload-src", "", "Local path to folder/file to upload")
+	RunSubcmd.Flags().StringVar(&uploadDest, "upload-dest", "", "Remote path (e.g. /tmp/app)")
+	RunSubcmd.Flags().StringVar(&excludePattern, "exclude", DefaultExclude, "Regex pattern to exclude files when uploading (default excludes all hidden files and folders)")
 	RunSubcmd.Flags().DurationVar(&timeout, "timeout", 0, "Timeout for the execution")
+	RunSubcmd.Flags().BoolVar(&mirror, "mirror", false, "Mirror destination (delete extraneous files in destination)")
 
 	JobSetCmd.AddCommand(LaunchSubcmd)
 	LaunchSubcmd.Flags().StringVar(&deviceType, "device-type", "tpu-7x-16", "Type of accelerator to launch (e.g. tpu-7x-16, gpu-l4-1)")

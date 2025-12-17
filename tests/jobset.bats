@@ -182,3 +182,38 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"No such file"* ]]
 }
+
+@test "krun jobset with deletes extraneous files" {
+    # 1. Prepare Local Files
+    mkdir -p "$TEST_DIR/data_mirror"
+    echo "Mirror File" > "$TEST_DIR/data_mirror/mirror.txt"
+
+    # 2. Pre-create extraneous file and dir on Pod 0
+    run kubectl exec -n default "$POD_0" -- sh -c "mkdir -p /tmp/mirror_test/extra_dir && echo 'Extra' > /tmp/mirror_test/extra.txt"
+    [ "$status" -eq 0 ]
+
+    # 3. Run krun
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
+        --kubeconfig="$KUBECONFIG" \
+        --namespace="default" \
+        --name="upload-test" \
+        --upload-src="$TEST_DIR/data_mirror" \
+        --upload-dest="/tmp/mirror_test"
+
+    [ "$status" -eq 0 ]
+
+    # 4. Verify 'mirror.txt' exists
+    run kubectl exec -n default "$POD_0" -- cat /tmp/mirror_test/mirror.txt
+    [ "$status" -eq 0 ]
+    [[ "$output" == "Mirror File" ]]
+
+    # 5. Verify 'extra.txt' is DELETED
+    run kubectl exec -n default "$POD_0" -- ls /tmp/mirror_test/extra.txt
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No such file"* ]]
+
+    # 6. Verify 'extra_dir' is DELETED
+    run kubectl exec -n default "$POD_0" -- ls -d /tmp/mirror_test/extra_dir
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"No such file"* ]]
+}
