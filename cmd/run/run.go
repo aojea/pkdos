@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/aojea/krun/internal/assets"
+	"github.com/aojea/krun/pkg/cdc"
 	"github.com/aojea/krun/pkg/clientset"
 	"github.com/aojea/krun/pkg/exec"
 	"github.com/spf13/cobra"
@@ -23,7 +25,6 @@ var (
 	uploadDest     string
 	timeout        time.Duration
 	excludePattern string
-	excludeRegex   *regexp.Regexp
 )
 
 var RunCmd = &cobra.Command{
@@ -35,68 +36,120 @@ var RunCmd = &cobra.Command{
   # Upload files and run a script
   krun run --label-selector=app=backend --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate inputs
-		if len(args) == 0 && uploadSrc == "" {
-			klog.Fatal("You must provide either a command (as arguments) or --upload-src (or both)")
-		}
-		if uploadSrc != "" && uploadDest == "" {
-			klog.Fatal("If --upload-src is provided, --upload-dest is required")
-		}
-
-		if labelSelector == "" {
-			klog.Fatal("You must provide a --label-selector to select target pods")
-		}
-
-		// Compile exclude regex if provided
-		if excludePattern != "" {
-			var err error
-			excludeRegex, err = regexp.Compile(excludePattern)
-			if err != nil {
-				klog.Fatalf("Invalid exclude pattern: %v", err)
-			}
-		}
-
-		// Setup Context
-		rootCtx := cmd.Context()
-		var ctx context.Context
-		var ctxCancel context.CancelFunc
-		if timeout > 0 {
-			ctx, ctxCancel = context.WithTimeout(rootCtx, timeout)
-		} else {
-			ctx, ctxCancel = context.WithCancel(rootCtx)
-		}
-		defer ctxCancel()
-
-		// Defer error handling for the metrics server
-		defer runtime.HandleCrash()
-
-		config, clientset, err := clientset.GetClient(kubeconfig)
-		if err != nil {
-			return err
-		}
-
-		klog.V(2).Infof("Listing pods in namespace %q with selector %q", namespace, labelSelector)
-		pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to get pods: %w", err)
-		}
-
-		if len(pods.Items) == 0 {
-			klog.Infoln("No pods found with selector:", labelSelector)
-			return nil
-		}
-
-		klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods.Items))
-
 		cmdArgs := []string{}
 		if cmd.ArgsLenAtDash() != -1 {
 			cmdArgs = args[cmd.ArgsLenAtDash():]
 		}
-
-		return exec.UploadAndExecuteOnPods(ctx, config, clientset, pods.Items, uploadSrc, uploadDest, excludeRegex, cmdArgs)
+		opts := Options{
+			Kubeconfig:     kubeconfig,
+			Namespace:      namespace,
+			LabelSelector:  labelSelector,
+			UploadSrc:      uploadSrc,
+			UploadDest:     uploadDest,
+			ExcludePattern: excludePattern,
+			Timeout:        timeout,
+			CmdArgs:        cmdArgs,
+		}
+		// Pass the root context from cobra command
+		return Run(cmd.Context(), opts)
 	},
+}
+
+type Options struct {
+	Kubeconfig     string
+	Namespace      string
+	LabelSelector  string
+	UploadSrc      string
+	UploadDest     string
+	ExcludePattern string
+	Timeout        time.Duration
+	CmdArgs        []string
+}
+
+func Run(ctx context.Context, opts Options) error {
+	// Validate inputs
+	if len(opts.CmdArgs) == 0 && opts.UploadSrc == "" {
+		return fmt.Errorf("you must provide either a command (as arguments) or --upload-src (or both)")
+	}
+	if opts.UploadSrc != "" && opts.UploadDest == "" {
+		return fmt.Errorf("if --upload-src is provided, --upload-dest is required")
+	}
+
+	if opts.LabelSelector == "" {
+		return fmt.Errorf("you must provide a --label-selector to select target pods")
+	}
+
+	// Compile exclude regex if provided
+	var excludeRegex *regexp.Regexp
+	if opts.ExcludePattern != "" {
+		var err error
+		excludeRegex, err = regexp.Compile(opts.ExcludePattern)
+		if err != nil {
+			return fmt.Errorf("invalid exclude pattern: %v", err)
+		}
+	}
+
+	// Setup Context
+	var ctxCancel context.CancelFunc
+	if opts.Timeout > 0 {
+		ctx, ctxCancel = context.WithTimeout(ctx, opts.Timeout)
+	} else {
+		ctx, ctxCancel = context.WithCancel(ctx)
+	}
+	defer ctxCancel()
+
+	// Defer error handling for the metrics server
+	defer runtime.HandleCrash()
+
+	config, clientset, err := clientset.GetClient(opts.Kubeconfig)
+	if err != nil {
+		return err
+	}
+
+	klog.V(2).Infof("Listing pods in namespace %q with selector %q", opts.Namespace, opts.LabelSelector)
+	pods, err := clientset.CoreV1().Pods(opts.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: opts.LabelSelector,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get pods: %w", err)
+	}
+
+	if len(pods.Items) == 0 {
+		klog.Infoln("No pods found with selector:", opts.LabelSelector)
+		return nil
+	}
+
+	klog.V(2).Infof("Found %d pods. Starting execution...\n", len(pods.Items))
+
+	// 1. Upload Files (SyncPods)
+	if opts.UploadSrc != "" {
+		agentData, err := assets.GetAgentFsyncBinaryForArch()
+		if err != nil {
+			return fmt.Errorf("failed to get agent binary: %w", err)
+		}
+
+		err = exec.UploadExecutableOnPods(ctx, config, clientset, pods.Items, cdc.AgentFile, agentData)
+		if err != nil {
+			return fmt.Errorf("failed to upload executable: %w", err)
+		}
+		// Cleanup agent binary
+		defer func() {
+			// Use a new context so cleanup isn't cancelled
+			cleanupCtx := context.Background()
+			_ = exec.RemovePathsFromPods(cleanupCtx, config, clientset, pods.Items, cdc.AgentFile)
+		}()
+
+		err = cdc.SyncPods(ctx, config, clientset, pods.Items, opts.UploadSrc, opts.UploadDest, excludeRegex)
+		if err != nil {
+			return fmt.Errorf("failed to sync pods: %w", err)
+		}
+	}
+
+	// 2. Execute Command
+	if len(opts.CmdArgs) > 0 {
+		return exec.ExecuteOnPods(ctx, config, clientset, pods.Items, opts.CmdArgs)
+	}
+	return nil
 }
 
 func init() {

@@ -28,7 +28,6 @@ func GetClient(kubeconfig string) (*rest.Config, *kubernetes.Clientset, error) {
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
-	
 	return getClientset(kubeconfig)
 }
 
