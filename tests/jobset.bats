@@ -217,3 +217,45 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"No such file"* ]]
 }
+
+@test "krun jobset --shell flag enables shell command piping" {
+    # Test that --shell flag allows running commands with && and other shell features
+    # This tests the fix for issue #18: "Piping commands together doesn't work"
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
+        --kubeconfig="$KUBECONFIG" \
+        --namespace="default" \
+        --name="upload-test" \
+        --shell \
+        -- "echo hello && echo world"
+
+    # Debug output if test fails
+    echo "--- krun output ---"
+    echo "$output"
+    echo "-------------------"
+    [ "$status" -eq 0 ]
+    
+    # Verify both echo commands executed (output from both pods)
+    [[ "$output" == *"hello"* ]]
+    [[ "$output" == *"world"* ]]
+}
+
+@test "krun jobset --shell flag enables cd command" {
+    # Test that --shell flag allows using cd (a shell builtin)
+    # This tests another scenario from issue #18
+    
+    run "$BATS_TEST_DIRNAME/../bin/krun" jobset run \
+        --kubeconfig="$KUBECONFIG" \
+        --namespace="default" \
+        --name="upload-test" \
+        --shell \
+        -- "cd /tmp && pwd"
+    
+    # Debug output if test fails
+    echo "--- krun output ---"
+    echo "$output"
+    echo "-------------------"
+    [ "$status" -eq 0 ]
+    
+    # Verify pwd shows /tmp (output from both pods)
+    [[ "$output" == *"/tmp"* ]]
+}

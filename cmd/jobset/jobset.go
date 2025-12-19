@@ -7,6 +7,7 @@ import (
 
 	"github.com/aojea/krun/cmd/run"
 	"github.com/aojea/krun/pkg/clientset"
+	"github.com/aojea/krun/pkg/exec"
 	"github.com/spf13/cobra"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,7 +35,7 @@ var (
 	uploadDest     string
 	timeout        time.Duration
 	excludePattern string
-
+	useShell       bool
 	// launch subcommand flags
 	deviceType string
 	image      string
@@ -54,7 +55,11 @@ var RunSubcmd = &cobra.Command{
   krun jobset run --name=stoelinga -- pip install -r requirements.txt
 
   # Upload files and run a script
-  krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh`,
+  krun jobset run --name=stoelinga --upload-src=./bin --upload-dest=/tmp/bin -- /tmp/bin/start.sh
+
+  # Run shell commands with pipes, cd, or && using --shell flag
+  krun jobset run --name=stoelinga --shell -- "cd /app && pip install -r requirements.txt"
+  krun jobset run --name=stoelinga --shell -- "apt update && apt install -y vim"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if name == "" {
 			klog.Fatal("You must provide a --jobset-name to select target pods")
@@ -64,6 +69,10 @@ var RunSubcmd = &cobra.Command{
 		cmdArgs := []string{}
 		if cmd.ArgsLenAtDash() != -1 {
 			cmdArgs = args[cmd.ArgsLenAtDash():]
+		}
+
+		if useShell {
+			cmdArgs = exec.WrapCommandInShell(cmdArgs)
 		}
 
 		opts := run.Options{
@@ -149,6 +158,7 @@ func init() {
 	RunSubcmd.Flags().StringVar(&excludePattern, "exclude", DefaultExclude, "Regex pattern to exclude files when uploading (default excludes all hidden files and folders)")
 	RunSubcmd.Flags().DurationVar(&timeout, "timeout", 0, "Timeout for the execution")
 	RunSubcmd.Flags().BoolVar(&mirror, "mirror", false, "Mirror destination (delete extraneous files in destination)")
+	RunSubcmd.Flags().BoolVar(&useShell, "shell", false, "Wrap command with 'sh -c' to enable shell features like pipes, &&, ||, and cd")
 
 	JobSetCmd.AddCommand(LaunchSubcmd)
 	LaunchSubcmd.Flags().StringVar(&deviceType, "device-type", "tpu-7x-16", "Type of accelerator to launch (e.g. tpu-7x-16, gpu-l4-1)")
